@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local editor and operating-system files
+.DS_Store
+.vscode/
+
+# Local credentials and personal MCP overrides
+.env
+.env.*
+!.env.example
+config/mcp_servers.json
+
+# Local assistant data may contain personal information
+workspace/
