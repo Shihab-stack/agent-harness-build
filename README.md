@@ -1,8 +1,9 @@
 # Agent Harness Build
 
 A small, local-first command-line assistant built with Python and Ollama. It
-can chat, use workspace file tools, save local memory, and optionally connect
-to MCP servers for time and web fetching. Optional cloud model backends are
+can chat, use workspace and project-inspection tools, save local memory, and
+optionally connect to MCP servers for time, web fetching, calendar, GitHub,
+graph memory, and isolated Python execution. Optional cloud model backends are
 available, but local Ollama is the default.
 
 ## Project layout
@@ -12,7 +13,7 @@ README.md
 pyproject.toml
 uv.lock
 config/
-  mcp_servers.example.json       Example time/fetch MCP configuration
+  mcp_servers.example.json       Example time/fetch/memory/sandbox MCP configuration
 src/agent_herness_build/
   __init__.py                    Package entry point
   cli.py                         Interactive commands and startup
@@ -20,9 +21,12 @@ src/agent_herness_build/
   models.py                      Local and optional cloud model settings
   mcp.py                         MCP configuration, connections, and routing
   paths.py                       Shared project/config/workspace paths
+  sandbox_mcp.py                 Docker-isolated Python execution MCP server
   tools/
-    files.py                     Workspace list/read/write tools
+    files.py                     Workspace and allowlisted project file tools
     memory.py                    Persistent local memory
+sandbox/
+  Dockerfile                     Python sandbox image definition
 examples/
   chat.py                        Minimal direct Ollama chat example
   v1.py ... v4.py                 Step-by-step tool-agent examples
@@ -88,9 +92,9 @@ the models installed on your computer with:
 ollama list
 ```
 
-`qwen3.5:4b` is the default. For a smaller local model, use
-`ollama pull qwen3.5:2b`. Neither local option requires a model-provider API
-key. The optional `gpt` and `claude` backends use paid provider APIs; set
+`qwen3.5:4b` is the default. The smaller `local-small` option defaults to
+`qwen2.5-coder:3b`. Neither local option requires a model-provider API key.
+The optional `gpt` and `claude` backends use paid provider APIs; set
 `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` before selecting those backends.
 
 The `--no-editable` option works across operating systems and avoids editable
@@ -146,15 +150,26 @@ Commands:
 | `/quit` or `/exit` | Exit the assistant |
 
 Conversation names may contain letters, numbers, hyphens, and underscores.
-When a file-writing tool would replace an existing workspace file, the
-assistant asks for confirmation first.
+Project inspection is read-only and limited to `README.md`, `pyproject.toml`,
+`src/`, `tests/`, and `config/mcp_servers.example.json`. Local configuration,
+credentials, environment files, Git metadata, and workspace data are excluded
+from project inspection. Workspace listing and reading remain scoped to
+`workspace/`; `write_file` can create or replace files only under
+`workspace/generated/` and asks before overwriting an existing file. Review
+generated files before using them as project changes.
+Use `list_project_files` and `read_project_file` to inspect the approved
+project files.
 
 ## MCP servers
 
 The assistant reads `config/mcp_servers.json` when it exists; otherwise it
-uses `config/mcp_servers.example.json`. The example starts the time and fetch
-servers using `uvx`. The first run may download those MCP packages and needs
-internet access. You can customize server commands by copying the example:
+uses `config/mcp_servers.example.json`. The example starts time and fetch via
+`uvx`, memory and GitHub via `npx`, and the Python sandbox via `uv`. First
+startup may download MCP packages and needs internet access. Set
+`GITHUB_PERSONAL_ACCESS_TOKEN` in the environment before launching the
+assistant to authenticate the GitHub server; do not put personal access
+tokens in the config file. You can customize server commands by copying the
+example:
 
 ```sh
 cp config/mcp_servers.example.json config/mcp_servers.json
@@ -162,6 +177,63 @@ cp config/mcp_servers.example.json config/mcp_servers.json
 
 The local config is git-ignored so personal settings stay out of commits.
 Use `--no-mcp` to skip MCP startup if you only need local tools.
+
+### Isolated Python execution
+
+The `sandbox` MCP server exposes `run_script`. It starts a fresh
+`agent-harness-python:3.13` container for each call. The existing
+`mcp-run-python` entry is intentionally not configured: it would execute code
+outside this Docker boundary.
+
+Prerequisites: Docker Desktop or Docker Engine must be installed and running.
+Build the image once from the repository root:
+
+```sh
+docker build --pull -t agent-harness-python:3.13 sandbox
+uv sync --no-editable --reinstall-package agent-harness-build
+```
+
+`--pull` is needed only when building/updating the image. Runtime uses
+`--pull=never`, so the MCP server does not fetch an image when handling code.
+The configured stdio server is started by:
+
+```sh
+uv run --no-sync python -m agent_herness_build.sandbox_mcp
+```
+
+Each script runs without network access (`--network=none`), with a read-only
+root filesystem, no host mounts, dropped Linux capabilities, no-new-privileges,
+an unprivileged UID, and a small writable `/tmp` tmpfs. Docker limits each
+container to 0.5 CPU, 256 MiB memory, no additional swap (`--memory-swap=256m`),
+64 processes, 64 KiB of input, 64 KiB of captured output, and 30 seconds of
+execution. The container is removed after the call. No project or workspace
+files are mounted into it.
+
+The agent invokes `mcp_sandbox_run_script` with a `python_code` string. For
+example:
+
+```json
+{
+  "python_code": "print(sum(range(10)))"
+}
+```
+
+The harness sends this as the MCP `run_script` argument; the MCP server passes
+the code to `python -I -` on the container's standard input. It is not
+interpolated into a shell command.
+
+The server returns the exit status and captured stdout/stderr. The fixtures in
+`tests/sandbox_scripts/` check normal computation and temporary-file access,
+blocked outbound networking, and behavior when a 1 GiB allocation exceeds the
+memory limit. The memory test may be terminated by the container OOM killer
+(reported as exit code 137) rather than catching `MemoryError`.
+
+Run the fixtures by passing their contents to `run_script`; these files are
+test inputs and are not mounted into the container. The normal offline unit
+tests mock Docker and verify the security flags. A live sandbox test requires
+Docker and the prebuilt image. Docker container isolation reduces risk but is
+not a hardened boundary against kernel or Docker-daemon vulnerabilities; do
+not use it to run code from untrusted parties on a security-critical host.
 
 ## Examples
 

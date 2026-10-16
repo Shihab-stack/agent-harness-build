@@ -15,10 +15,14 @@ MAX_TOOL_ROUNDS = 8
 LOCAL_TOOLS = {**FILE_TOOLS, "save_memory": save_memory}
 SYSTEM_PROMPT = """You are a helpful personal assistant. Be concise.
 
-The user's files are in the provided workspace. Use the file tools to list,
-read, or write those files. Use save_memory for useful lasting facts the user
-shares. Use only provided tools for time and web fetch tasks. Be clear about
-tool errors.
+Use list_project_files and read_project_file for read-only inspection of
+allowlisted project files. Never use project inspection to access credentials
+or local configuration. The regular file tools operate on the user's workspace;
+write_file can create files only under workspace/generated/ and asks before
+overwriting. Use save_memory for useful lasting facts the user shares. Use only
+the sandbox tool for Python code; never route code execution through another
+Python MCP server. Use only provided tools for time and web fetch tasks. Be
+clear about tool errors.
 
 Remembered facts:
 {memory}"""

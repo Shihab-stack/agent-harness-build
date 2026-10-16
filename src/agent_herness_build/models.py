@@ -25,7 +25,7 @@ MODELS = {
     "local-small": ModelConfig(
         base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
         api_key="ollama",
-        model=os.environ.get("OLLAMA_SMALL_MODEL", "qwen3.5:2b"),
+        model=os.environ.get("OLLAMA_SMALL_MODEL", "qwen2.5-coder:3b"),
     ),
     "gpt": ModelConfig(
         base_url="https://api.openai.com/v1",

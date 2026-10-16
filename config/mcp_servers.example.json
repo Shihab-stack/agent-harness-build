@@ -7,6 +7,30 @@
     "fetch": {
       "command": "uvx",
       "args": ["mcp-server-fetch"]
+    },
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ]
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ]
+    },
+    "sandbox": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--no-sync",
+        "python",
+        "-m",
+        "agent_herness_build.sandbox_mcp"
+      ]
     }
   }
 }

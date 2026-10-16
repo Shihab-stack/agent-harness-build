@@ -17,6 +17,7 @@ wheels/
 .env
 .env.*
 !.env.example
+/credentials.json
 config/mcp_servers.json
 
 # Local assistant data may contain personal information
