@@ -10,6 +10,7 @@ from agent_herness_build.agent import LOCAL_TOOLS, run_agent
 from agent_herness_build.conversations import load_conversation, save_conversation
 from agent_herness_build.mcp import connect_mcp
 from agent_herness_build.models import DEFAULT_MODEL, MODELS, check_ollama_model
+from agent_herness_build.skills import list_skills, load_skill
 from agent_herness_build.tools.files import FILE_TOOL_SCHEMAS
 from agent_herness_build.tools.memory import MEMORY_TOOL, load_memory
 
@@ -27,6 +28,33 @@ def print_tools(tool_schemas: list[dict]) -> None:
         function = schema["function"]
         origin = "local" if function["name"] in LOCAL_TOOLS else "mcp"
         print(f"  [{origin}] {function['name']}: {function.get('description', '')}")
+
+
+def handle_skill_command(line: str, active_skill: str | None) -> tuple[bool, str | None]:
+    """List, activate, or deactivate a behavioral skill."""
+    command, _, argument = line.partition(" ")
+    argument = argument.strip()
+    if command == "/skills":
+        available = list_skills()
+        print("Available skills: " + (", ".join(available) if available else "(none)"))
+        if active_skill:
+            print(f"Active skill: {active_skill}")
+        return True, active_skill
+    if command != "/skill":
+        return False, active_skill
+    if not argument:
+        print("Usage: /skill <name|off>. Use /skills to list skills.")
+        return True, active_skill
+    if argument == "off":
+        print(f"Deactivated skill '{active_skill}'." if active_skill else "No skill is active.")
+        return True, None
+    try:
+        load_skill(argument)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Could not activate skill: {exc}")
+        return True, active_skill
+    print(f"Activated skill '{argument}'. Use /skill off to deactivate it.")
+    return True, argument
 
 
 def handle_command(
@@ -52,6 +80,7 @@ def handle_command(
     elif command == "/help":
         print(
             "Commands: /help, /models, /model <name>, /tools, /memory, "
+            "/skills, /skill <name|off>, "
             "/save <name>, /resume <name>, /quit"
         )
     elif command in {"/quit", "/exit"}:
@@ -85,6 +114,7 @@ async def run_cli(initial_model: str, enable_mcp: bool) -> None:
         available = ", ".join(MODELS)
         raise ValueError(f"Unknown model '{initial_model}'. Available: {available}")
     active_model = initial_model
+    active_skill: str | None = None
     if active_model.startswith("local"):
         await asyncio.to_thread(
             check_ollama_model,
@@ -105,6 +135,7 @@ async def run_cli(initial_model: str, enable_mcp: bool) -> None:
         )
         print(
             "Commands: /help, /models, /model <name>, /tools, /memory, "
+            "/skills, /skill <name|off>, "
             "/save <name>, /resume <name>, /quit\n"
         )
         try:
@@ -127,6 +158,11 @@ async def run_cli(initial_model: str, enable_mcp: bool) -> None:
                             print(f"resumed conversation '{name}'")
                     except (OSError, ValueError) as exc:
                         print(f"Could not {command[1:]} conversation: {exc}")
+                    continue
+                skill_handled, active_skill = handle_skill_command(
+                    line, active_skill
+                )
+                if skill_handled:
                     continue
                 if line.startswith("/"):
                     previous_model = active_model
@@ -164,6 +200,7 @@ async def run_cli(initial_model: str, enable_mcp: bool) -> None:
                         mcp_routes,
                         load_memory(),
                         on_token=lambda text: print(text, end="", flush=True),
+                        active_skill=active_skill,
                     )
                     print("\n")
                 except (APIConnectionError, APITimeoutError, APIStatusError) as exc:

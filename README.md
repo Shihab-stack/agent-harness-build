@@ -13,13 +13,21 @@ README.md
 pyproject.toml
 uv.lock
 config/
-  mcp_servers.example.json       Example time/fetch/memory/sandbox MCP configuration
+  mcp_servers.example.json       Example time/fetch/memory/docs/browser/sandbox MCP configuration
+skills/
+  systematic-debugging.md        Evidence-first debugging workflow
+  code-reviewer.md               Severity-ranked code review workflow
+  env-doctor.md                  Runtime and environment diagnostics
+  git-commit-writer.md           Conventional Commit message workflow
+  mcp-builder.md                 Safe MCP server design and scaffolding
+  deep-reasoning.md              Optional structured reasoning workflow
 src/agent_herness_build/
   __init__.py                    Package entry point
   cli.py                         Interactive commands and startup
   agent.py                       Model/tool conversation loop
   models.py                      Local and optional cloud model settings
   mcp.py                         MCP configuration, connections, and routing
+  skills.py                      On-demand behavioral skill loading
   paths.py                       Shared project/config/workspace paths
   sandbox_mcp.py                 Docker-isolated Python execution MCP server
   tools/
@@ -144,6 +152,9 @@ Commands:
 | `/model claude` | Select Anthropic (requires an API key and may incur charges) |
 | `/tools` | List tools available in this run |
 | `/memory` | Display saved memory |
+| `/skills` | List available behavioral skills and the active skill |
+| `/skill <name>` | Activate a skill for subsequent turns |
+| `/skill off` | Deactivate the current skill |
 | `/save <name>` | Save the current conversation under `workspace/conversations/` |
 | `/resume <name>` | Resume a saved conversation |
 | `/help` | Show available commands |
@@ -160,12 +171,41 @@ generated files before using them as project changes.
 Use `list_project_files` and `read_project_file` to inspect the approved
 project files.
 
+## Behavioral skills
+
+Skills are Markdown workflows under the project-root `skills/` directory.
+They are instructions for the current model, not model training or additional
+tools. List and activate them in the interactive CLI:
+
+```text
+/skills
+/skill systematic-debugging
+The app fails to load its settings. Help me reproduce and diagnose it.
+/skill off
+/skill mcp-builder
+Help me design a read-only MCP server for our internal status API.
+```
+
+Available skills are `systematic-debugging`, `code-reviewer`, `env-doctor`,
+`git-commit-writer`, `mcp-builder`, and `deep-reasoning`. The selected skill is
+included in the system prompt for subsequent turns in the current CLI session;
+it is not persisted across restarts. Use `/skill off` to return to the base
+behavior. Skills cannot grant capabilities the configured tools do not provide;
+if required tools are unavailable, the assistant should say what it could not
+inspect or verify.
+
 ## MCP servers
 
 The assistant reads `config/mcp_servers.json` when it exists; otherwise it
 uses `config/mcp_servers.example.json`. The example starts time and fetch via
-`uvx`, memory and GitHub via `npx`, and the Python sandbox via `uv`. First
-startup may download MCP packages and needs internet access. Set
+`uvx`, memory, GitHub, Context7, and Playwright via `npx`, and the Python
+sandbox via `uv`. Context7 provides library documentation tools; the headless
+Playwright MCP provides browser automation for navigation and web-app testing.
+The Sequential Thinking MCP exposes a tool for structuring complex problem
+solving; it does not guarantee correct answers or replace independent
+verification. First startup may download MCP packages and needs internet
+access. Playwright may also need its Chromium browser installed on the host
+(for example, `npx playwright install chromium`). Set
 `GITHUB_PERSONAL_ACCESS_TOKEN` in the environment before launching the
 assistant to authenticate the GitHub server; do not put personal access
 tokens in the config file. You can customize server commands by copying the
@@ -177,6 +217,26 @@ cp config/mcp_servers.example.json config/mcp_servers.json
 
 The local config is git-ignored so personal settings stay out of commits.
 Use `--no-mcp` to skip MCP startup if you only need local tools.
+
+Example requests when the configured servers are connected:
+
+- `Use Context7 to find the current documentation for the installed FastAPI version.`
+- `Use the headless browser to open my local app, check the sign-in page, and report what you observe.`
+
+Tool availability depends on successful MCP startup. Use `/tools` to see the
+tools registered in the current session; do not assume a server connected
+when it failed to start.
+
+To try Sequential Thinking, restart the harness after configuring it, run
+`/tools` and look for tools with the `mcp_sequential-thinking_` prefix, then
+activate the skill and ask a multi-step question:
+
+```text
+/skill deep-reasoning
+Solve this multi-step logic puzzle. Use the Sequential Thinking tool if it is
+available, verify the result, and give me a concise explanation without
+revealing private chain-of-thought.
+```
 
 ### Isolated Python execution
 

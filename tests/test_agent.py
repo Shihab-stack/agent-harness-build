@@ -108,6 +108,49 @@ class AgentToolDispatchTests(unittest.TestCase):
             )
         self.assertEqual(messages, [{"role": "system", "content": "old"}])
 
+    def test_active_skill_is_added_to_system_prompt(self) -> None:
+        async def stream(*chunks):
+            for chunk in chunks:
+                yield chunk
+
+        answer_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content="done", tool_calls=None)
+                )
+            ]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(side_effect=[stream(answer_chunk)])
+                )
+            )
+        )
+        messages: list[dict] = []
+        with patch(
+            "agent_herness_build.agent.load_skill",
+            return_value="Always verify the exact failing behavior.",
+        ):
+            asyncio.run(
+                run_agent(
+                    "debug this",
+                    messages,
+                    client,
+                    ModelConfig("http://localhost:11434/v1", "ollama", "test"),
+                    [],
+                    {},
+                    "(none)",
+                    active_skill="systematic-debugging",
+                )
+            )
+
+        self.assertIn(
+            "# Active behavioral skill: systematic-debugging",
+            messages[0]["content"],
+        )
+        self.assertIn("Always verify the exact failing behavior.", messages[0]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

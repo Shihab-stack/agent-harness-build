@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 
 from agent_herness_build.mcp import MCPRoute, call_mcp_tool
 from agent_herness_build.models import ModelConfig
+from agent_herness_build.skills import load_skill
 from agent_herness_build.tools.files import FILE_TOOLS
 from agent_herness_build.tools.memory import save_memory
 
@@ -22,7 +23,10 @@ write_file can create files only under workspace/generated/ and asks before
 overwriting. Use save_memory for useful lasting facts the user shares. Use only
 the sandbox tool for Python code; never route code execution through another
 Python MCP server. Use only provided tools for time and web fetch tasks. Be
-clear about tool errors.
+clear about tool errors. For library/framework questions, consult Context7's
+version-specific documentation tools when available. For browser or web-app
+tasks, use the Playwright MCP tools when available and report what was actually
+tested.
 
 Remembered facts:
 {memory}"""
@@ -53,18 +57,24 @@ async def run_agent(
     mcp_routes: dict[str, MCPRoute],
     memory: str,
     on_token: Callable[[str], None] | None = None,
+    active_skill: str | None = None,
 ) -> str:
     """Stream a turn, run any requested tools, and retain completed history."""
     previous_messages = list(messages)
+    system_prompt = SYSTEM_PROMPT.format(memory=memory)
+    if active_skill is not None:
+        skill_instructions = load_skill(active_skill)
+        system_prompt += (
+            f"\n\n# Active behavioral skill: {active_skill}\n"
+            f"{skill_instructions}"
+        )
     if messages:
         messages[0] = {
             "role": "system",
-            "content": SYSTEM_PROMPT.format(memory=memory),
+            "content": system_prompt,
         }
     else:
-        messages.append(
-            {"role": "system", "content": SYSTEM_PROMPT.format(memory=memory)}
-        )
+        messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
     completed = False

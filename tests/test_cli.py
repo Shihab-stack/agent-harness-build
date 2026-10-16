@@ -24,6 +24,38 @@ class CLITests(unittest.TestCase):
         self.assertIn("/save <name>", output.getvalue())
         self.assertIn("/resume <name>", output.getvalue())
 
+    def test_skill_command_activates_known_skill(self) -> None:
+        output = io.StringIO()
+        with patch("agent_herness_build.cli.load_skill", return_value="# Skill"):
+            with redirect_stdout(output):
+                handled, active_skill = cli.handle_skill_command(
+                    "/skill systematic-debugging", None
+                )
+        self.assertTrue(handled)
+        self.assertEqual(active_skill, "systematic-debugging")
+        self.assertIn("Activated skill", output.getvalue())
+
+    def test_skill_command_does_not_activate_unknown_skill(self) -> None:
+        output = io.StringIO()
+        with patch(
+            "agent_herness_build.cli.load_skill",
+            side_effect=ValueError("no skill named 'missing'"),
+        ):
+            with redirect_stdout(output):
+                handled, active_skill = cli.handle_skill_command("/skill missing", None)
+        self.assertTrue(handled)
+        self.assertIsNone(active_skill)
+        self.assertIn("Could not activate skill", output.getvalue())
+
+    def test_skill_command_can_deactivate_active_skill(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            handled, active_skill = cli.handle_skill_command(
+                "/skill off", "systematic-debugging"
+            )
+        self.assertTrue(handled)
+        self.assertIsNone(active_skill)
+
     def test_local_model_request_error_is_actionable(self) -> None:
         message = cli.request_error_message(
             RuntimeError("model missing"), "local-small", "qwen3.5:2b"
