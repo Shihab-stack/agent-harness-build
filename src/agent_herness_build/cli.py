@@ -10,7 +10,14 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpe
 from agent_herness_build.agent import LOCAL_TOOLS, run_agent
 from agent_herness_build.conversations import load_conversation, save_conversation
 from agent_herness_build.mcp import DEFAULT_STARTUP_TIMEOUT, connect_mcp
-from agent_herness_build.models import DEFAULT_MODEL, MODELS, check_ollama_model
+from agent_herness_build.models import (
+    DEFAULT_MODEL,
+    MODELS,
+    check_ollama_model,
+    fallback_models,
+    model_is_configured,
+    required_api_key,
+)
 from agent_herness_build.skills import list_skills, load_skill
 from agent_herness_build.tools.files import FILE_TOOL_SCHEMAS
 from agent_herness_build.tools.memory import MEMORY_TOOL, load_memory
@@ -20,7 +27,11 @@ def print_models(active_model: str) -> None:
     """Display available model backends and mark the active backend."""
     for name, config in MODELS.items():
         marker = "*" if name == active_model else " "
-        print(f" {marker} {name:<12} {config.model} ({config.base_url})")
+        availability = "" if model_is_configured(name) else " [not configured]"
+        print(
+            f" {marker} {name:<12} {config.model} "
+            f"({config.base_url}){availability}"
+        )
 
 
 def print_tools(tool_schemas: list[dict]) -> None:
@@ -86,6 +97,9 @@ def handle_command(
     elif command == "/model":
         if argument not in MODELS:
             print(f"Unknown model '{argument}'. Use /models to see choices.")
+        elif not model_is_configured(argument):
+            required_key = required_api_key(argument)
+            print(f"Cannot switch model: set {required_key} first.")
         else:
             active_model = argument
             print(f"Using {active_model} ({MODELS[active_model].model}).")
@@ -120,6 +134,11 @@ def request_error_message(error: Exception, backend: str, model: str) -> str:
             "model with /model, then try again."
         )
     if isinstance(error, APIStatusError):
+        if error.status_code == 429:
+            return (
+                f"{backend} reached its rate or usage limit (HTTP 429). "
+                "No configured fallback model is available."
+            )
         return f"Model request failed (HTTP {error.status_code}): {error.message}"
     return f"Could not reach the {backend} model service: {error}"
 
@@ -134,6 +153,9 @@ async def run_cli(
     if initial_model not in MODELS:
         available = ", ".join(MODELS)
         raise ValueError(f"Unknown model '{initial_model}'. Available: {available}")
+    if not model_is_configured(initial_model):
+        required_key = required_api_key(initial_model)
+        raise ValueError(f"Model '{initial_model}' requires {required_key}.")
     active_model = initial_model
     active_skill: str | None = None
     if active_model.startswith("local"):
@@ -213,28 +235,70 @@ async def run_cli(
                                 print(f"Cannot switch model: {exc}")
                                 active_model = previous_model
                         continue
-                model = MODELS[active_model]
-                client = AsyncOpenAI(base_url=model.base_url, api_key=model.api_key)
-                try:
-                    print("\nassistant: ", end="", flush=True)
-                    await run_agent(
-                        line,
-                        messages,
-                        client,
-                        model,
-                        tool_schemas,
-                        mcp_routes,
-                        load_memory(),
-                        on_token=lambda text: print(text, end="", flush=True),
-                        active_skill=active_skill,
-                        confirm_action=confirm_mcp_action,
+                candidates = [active_model]
+                while candidates:
+                    selected_model = candidates.pop(0)
+                    if (
+                        selected_model != active_model
+                        and selected_model.startswith("local")
+                    ):
+                        try:
+                            await asyncio.to_thread(
+                                check_ollama_model,
+                                MODELS[selected_model].base_url,
+                                MODELS[selected_model].model,
+                            )
+                        except RuntimeError as exc:
+                            print(f"Skipping fallback {selected_model}: {exc}")
+                            continue
+                    if selected_model != active_model:
+                        active_model = selected_model
+                        print(
+                            f"\nSwitching to fallback model: {active_model} "
+                            f"({MODELS[active_model].model})."
+                        )
+                    model = MODELS[active_model]
+                    client = AsyncOpenAI(
+                        base_url=model.base_url, api_key=model.api_key
                     )
-                    print("\n")
-                except (APIConnectionError, APITimeoutError, APIStatusError) as exc:
-                    message = request_error_message(exc, active_model, model.model)
-                    print(f"\n{message}\n")
-                finally:
-                    await client.close()
+                    try:
+                        print("\nassistant: ", end="", flush=True)
+                        await run_agent(
+                            line,
+                            messages,
+                            client,
+                            model,
+                            tool_schemas,
+                            mcp_routes,
+                            load_memory(),
+                            on_token=lambda text: print(text, end="", flush=True),
+                            active_skill=active_skill,
+                            confirm_action=confirm_mcp_action,
+                        )
+                        print("\n")
+                        break
+                    except (
+                        APIConnectionError,
+                        APITimeoutError,
+                        APIStatusError,
+                    ) as exc:
+                        if isinstance(exc, APIStatusError):
+                            fallback = fallback_models(active_model, exc.status_code)
+                            if fallback:
+                                candidates = fallback
+                                if exc.status_code == 413:
+                                    reason = "rejected the request size"
+                                else:
+                                    reason = "reached its rate or usage limit"
+                                print(f"\n{active_model} {reason}; trying a fallback.")
+                                continue
+                        message = request_error_message(
+                            exc, active_model, model.model
+                        )
+                        print(f"\n{message}\n")
+                        break
+                    finally:
+                        await client.close()
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye.")
 
@@ -248,7 +312,10 @@ def main() -> None:
         "--model",
         choices=MODELS,
         default=DEFAULT_MODEL,
-        help="initial model backend (default: local Ollama)",
+        help=(
+            "initial model backend "
+            "(default: configured cloud provider or local Ollama)"
+        ),
     )
     parser.add_argument(
         "--no-mcp",

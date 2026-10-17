@@ -14,6 +14,7 @@ class ModelConfig:
     base_url: str
     api_key: str
     model: str
+    max_output_tokens: int = 2048
 
 
 MODELS = {
@@ -27,23 +28,19 @@ MODELS = {
         api_key="ollama",
         model=os.environ.get("OLLAMA_SMALL_MODEL", "qwen2.5-coder:3b"),
     ),
-    # --- FREE CLOUD PROVIDERS (NO CREDIT CARD REQUIRED) ---
-    "github-gpt4o": ModelConfig(
-        base_url="https://models.inference.ai.azure.com",
-        api_key=os.environ.get("GITHUB_TOKEN", ""),
-        model="gpt-4o",
-    ),
-    "github-deepseek": ModelConfig(
-        base_url="https://models.inference.ai.azure.com",
-        api_key=os.environ.get("GITHUB_TOKEN", ""),
-        model="DeepSeek-R1",
-    ),
+    # --- OPTIONAL CLOUD PROVIDERS ---
     "groq": ModelConfig(
         base_url="https://api.groq.com/openai/v1",
         api_key=os.environ.get("GROQ_API_KEY", ""),
-        model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        model=os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
+        max_output_tokens=1024,
     ),
-    # -----------------------------------------------------
+    "gemini": ModelConfig(
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        api_key=os.environ.get("GEMINI_API_KEY", ""),
+        model=os.environ.get("GEMINI_MODEL", "gemini-3.8-flash"),
+        max_output_tokens=1024,
+    ),
     "gpt": ModelConfig(
         base_url="https://api.openai.com/v1",
         api_key=os.environ.get("OPENAI_API_KEY", ""),
@@ -56,8 +53,59 @@ MODELS = {
     ),
 }
 
-# Change default from local to a free cloud model if desired
-DEFAULT_MODEL = "github-gpt4o"
+FALLBACK_ORDER = (
+    "gemini",
+    "groq",
+    "local",
+    "local-small",
+)
+MODEL_API_KEY_ENV = {
+    "gemini": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "gpt": "OPENAI_API_KEY",
+    "claude": "ANTHROPIC_API_KEY",
+}
+
+
+def model_is_configured(name: str) -> bool:
+    """Return whether a backend has the credentials required to use it."""
+    config = MODELS[name]
+    return name.startswith("local") or bool(config.api_key.strip())
+
+
+def required_api_key(name: str) -> str | None:
+    """Return the environment variable required by a cloud backend."""
+    return MODEL_API_KEY_ENV.get(name)
+
+
+def default_model() -> str:
+    """Prefer configured Gemini, then Groq, otherwise use local Ollama."""
+    return next(
+        (
+            name
+            for name in FALLBACK_ORDER
+            if not name.startswith("local") and model_is_configured(name)
+        ),
+        "local",
+    )
+
+
+def fallback_models(name: str, status_code: int) -> list[str]:
+    """Return configured fallbacks after provider rate or request-size limits."""
+    if status_code not in {413, 429}:
+        return []
+    try:
+        current_index = FALLBACK_ORDER.index(name)
+    except ValueError:
+        return []
+    return [
+        candidate
+        for candidate in FALLBACK_ORDER[current_index + 1 :]
+        if model_is_configured(candidate)
+    ]
+
+
+DEFAULT_MODEL = default_model()
 
 
 def check_ollama_model(base_url: str, model: str) -> None:

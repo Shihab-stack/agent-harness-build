@@ -12,6 +12,7 @@ wheels/
 # Local editor and operating-system files
 .DS_Store
 .vscode/
+.playwright-mcp/
 
 # Local credentials and personal MCP overrides
 .env

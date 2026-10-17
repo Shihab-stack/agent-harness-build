@@ -5,6 +5,7 @@ import io
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -12,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 import httpx2
 from openai import APIConnectionError, APIStatusError
 from agent_herness_build import cli, conversations
+from agent_herness_build.models import MODELS
 
 
 class CLITests(unittest.TestCase):
@@ -162,6 +164,74 @@ class CLITests(unittest.TestCase):
             asyncio.run(cli.run_cli("local", enable_mcp=False))
         self.assertIn("Cannot switch model: model missing", output.getvalue())
         self.assertIn("* local", output.getvalue())
+
+    def test_rate_limit_switches_from_groq_to_local(self) -> None:
+        request = httpx2.Request(
+            "POST", "https://api.groq.com/openai/v1/chat/completions"
+        )
+        error = APIStatusError(
+            "rate limited",
+            response=httpx2.Response(429, request=request),
+            body=None,
+        )
+        client = SimpleNamespace(close=AsyncMock())
+        output = io.StringIO()
+        configured = {"groq": replace(MODELS["groq"], api_key="groq")}
+        with (
+            patch.dict(MODELS, configured),
+            patch.object(cli, "check_ollama_model"),
+            patch.object(cli, "AsyncOpenAI", return_value=client),
+            patch.object(
+                cli, "run_agent", AsyncMock(side_effect=[error, "recovered"])
+            ) as run_agent,
+            patch.object(cli, "load_memory", return_value=""),
+            patch(
+                "builtins.input",
+                side_effect=["request", "/quit"],
+            ),
+            redirect_stdout(output),
+        ):
+            asyncio.run(cli.run_cli("groq", enable_mcp=False))
+
+        self.assertEqual(run_agent.await_count, 2)
+        self.assertEqual(
+            run_agent.await_args_list[0].args[3].model,
+            configured["groq"].model,
+        )
+        self.assertEqual(
+            run_agent.await_args_list[1].args[3].model,
+            MODELS["local"].model,
+        )
+        self.assertIn("Switching to fallback model: local", output.getvalue())
+
+    def test_groq_authentication_failure_does_not_fallback(self) -> None:
+        request = httpx2.Request(
+            "POST", "https://api.groq.com/openai/v1/chat/completions"
+        )
+        error = APIStatusError(
+            "unauthorized",
+            response=httpx2.Response(401, request=request),
+            body=None,
+        )
+        output = io.StringIO()
+        configured = {"groq": replace(MODELS["groq"], api_key="groq")}
+        with (
+            patch.dict(MODELS, configured),
+            patch.object(
+                cli,
+                "AsyncOpenAI",
+                return_value=SimpleNamespace(close=AsyncMock()),
+            ),
+            patch.object(cli, "run_agent", AsyncMock(side_effect=error)) as run_agent,
+            patch.object(cli, "load_memory", return_value=""),
+            patch("builtins.input", side_effect=["request", "/quit"]),
+            redirect_stdout(output),
+        ):
+            asyncio.run(cli.run_cli("groq", enable_mcp=False))
+
+        run_agent.assert_awaited_once()
+        self.assertIn("HTTP 401", output.getvalue())
+        self.assertNotIn("Switching to fallback model", output.getvalue())
 
 
 if __name__ == "__main__":

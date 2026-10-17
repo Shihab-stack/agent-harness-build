@@ -114,6 +114,7 @@ async def run_agent(
                 messages=messages,
                 tools=tool_schemas or None,
                 stream=True,
+                max_tokens=model.max_output_tokens,
                 **request_options,
             )
             tool_calls: dict[int, dict[str, Any]] = {}

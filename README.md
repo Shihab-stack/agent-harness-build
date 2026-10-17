@@ -4,7 +4,8 @@ A small, local-first command-line assistant built with Python and Ollama. It
 can chat, use workspace and project-inspection tools, save local memory, and
 optionally connect to MCP servers for time, web fetching, calendar, GitHub,
 graph memory, and isolated Python execution. Optional cloud model backends are
-available, but local Ollama is the default.
+available. When configured, Groq is preferred; otherwise the assistant
+defaults to local Ollama.
 
 ## Project layout
 
@@ -103,10 +104,37 @@ the models installed on your computer with:
 ollama list
 ```
 
-`qwen3.5:4b` is the default. The smaller `local-small` option defaults to
-`qwen2.5-coder:3b`. Neither local option requires a model-provider API key.
-The optional `gpt` and `claude` backends use paid provider APIs; set
-`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` before selecting those backends.
+`qwen3.5:4b` is the default local model. The smaller `local-small` option
+defaults to `qwen2.5-coder:3b`. Neither local option requires a model-provider
+API key. Groq uses `GROQ_API_KEY`; its default model is
+`openai/gpt-oss-120b`, which can be overridden with `GROQ_MODEL`. Set the key
+in the terminal session that launches the assistant. Gemini uses
+`GEMINI_API_KEY` and defaults to `gemini-3.8-flash` through Google's
+OpenAI-compatible API. Google lists Gemini 3.8 Flash as available on its free
+API tier; model availability and account-specific quotas can change. If both
+Gemini and Groq are configured, Gemini is the default and Groq is next in the
+fallback order. If only one is configured, that provider is the default;
+otherwise the assistant defaults to local Ollama. Set `GEMINI_MODEL` to choose
+another Gemini model.
+
+Google applies free-tier rate limits per project, including requests per
+minute, input tokens per minute, and requests per day. These values depend on
+the project and model; view the current limits in
+[Google AI Studio](https://aistudio.google.com/rate-limit?timeRange=last-28-days).
+The agent caps Gemini and Groq responses at 1,024 output tokens. This limits
+response size but does not guarantee staying under Google's input-token or
+request quotas. Google says free-tier Gemini API content may be used to improve
+its products; do not send sensitive information through the free tier.
+
+GitHub integration for tools via MCP is separate from model inference;
+GitHub Models inference is no longer offered.
+
+Cloud calls are capped at 1,024 output tokens. If Gemini or Groq returns HTTP
+413 (request too large) or HTTP 429 (rate or usage limit), the assistant tries
+the next configured provider and then installed local Ollama models. A missing
+local model is skipped with an install hint. Provider free-tier quotas are set
+by the providers and can change; the output-token cap does not guarantee or
+measure a provider's remaining quota.
 
 The `--no-editable` option works across operating systems and avoids editable
 install path issues some Python environments can have.
@@ -130,11 +158,40 @@ Run without starting MCP servers (local file and memory tools still work):
 ```sh
 uv run --no-editable agent-harness-build --no-mcp
 ```
+CLOUD MODELS: 
 
-To reduce MCP tool count for a small model, choose only the servers needed for
+### Gemini and Groq troubleshooting
+- Set `GEMINI_API_KEY` or `GROQ_API_KEY` in the same terminal session before starting the assistant.
+- Restart the assistant after changing a key; keys are read when the process starts.
+- Check presence without exposing the secret: `uv run --no-editable python -c 'from agent_herness_build.models import model_is_configured; print("Gemini:", model_is_configured("gemini"), "Groq:", model_is_configured("groq"))'`.
+- `True` means only that a key is non-empty; it does not verify the key, account, model access, or quota.
+- Use `/models` to see configured providers and `/model gemini` or `/model groq` to select one.
+- Gemini keys are managed in [Google AI Studio](https://aistudio.google.com/); confirm the project and model have API access.
+- Check Gemini project/model quotas in [Google AI Studio rate limits](https://aistudio.google.com/rate-limit).
+- Check Groq organization/model quotas in [Groq Console limits](https://console.groq.com/settings/limits).
+- HTTP 401 usually means the key is invalid; verify it and create a replacement if needed.
+- HTTP 403 indicates access is denied; check project, account, and model eligibility with the provider.
+- HTTP 413 means the request is too large; shorten the conversation/request and retry.
+- HTTP 429 means a rate or usage limit was reached; wait for reset or use another available provider.
+- The agent falls back on HTTP 413/429 only; a key being set does not guarantee free-tier access or remaining quota.
+
+api key test:
+```sh
+[[ -n"$GEMINI_API_KEY" ]] && echo "Gemini key: set" || echo "Gemini  key: missing"
+[[ -n "$GROQ_API_KEY" ]] && echo "Groq key: set" || echo "Groq key: missing"
+```
+
+
+You need to reduce MCP tool count for a  models, choose only the servers needed for
 that session. The default remains all configured servers:
 
 ```sh
+uv run --no-editable python -c \
+  'from agent_herness_build.models import model_is_configured; print("Groq configured:", model_is_configured("groq"))'
+
+uv run --no-editable python -c \
+  'from agent_herness_build.models import model_is_configured; print("Gemini configured:", model_is_configured("gemini"))'
+
 uv run --no-editable agent-harness-build --mcp-servers time,fetch
 ```
 
@@ -165,6 +222,8 @@ Commands:
 | `/models` | Show configured model backends and the active one |
 | `/model local` | Switch to the default local Ollama model |
 | `/model local-small` | Switch to the smaller local Ollama model |
+| `/model gemini` | Select Gemini (requires `GEMINI_API_KEY`) |
+| `/model groq` | Select Groq (requires `GROQ_API_KEY`) |
 | `/model gpt` | Select OpenAI (requires an API key and may incur charges) |
 | `/model claude` | Select Anthropic (requires an API key and may incur charges) |
 | `/tools` | List tools available in this run |
@@ -246,6 +305,46 @@ the action. Use `/reset` in a chat to clear that chat's in-memory conversation.
 The bot does not persist Telegram conversation history across restarts. Keep
 the computer awake, connected to the internet, and the bot process running for
 Telegram long polling to receive messages.
+
+#### Manual Telegram smoke test
+
+Run the automated tests first, then start the bot from the repository root in
+the same terminal where `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, and
+the chosen provider key are set:
+
+```sh
+uv run --no-editable python -m unittest discover -s tests -v
+uv run --no-editable agent-harness-telegram --model groq --mcp-servers time,fetch
+```
+
+Use these prompts in Telegram, one at a time:
+
+1. `Reply with exactly: Telegram connection works.`
+   - Expect the exact reply and no traceback in the terminal.
+2. `Use the time tool to tell me the current UTC time. State the returned time.`
+   - Expect a time-tool call and an answer based on its result. If the tool
+     requires approval, approve it in Telegram.
+3. `Use the fetch tool to retrieve https://example.com and tell me its page title.`
+   - Expect a fetch-tool call and a short result based on the fetched page. If
+     approval is requested, approve it; do not provide credentials or private
+     URLs.
+4. `/reset`, then `What did I ask you in my previous message?`
+   - Expect the bot to confirm the reset and not retain the earlier exchange.
+
+To verify that denied MCP actions fail closed, request a read-only browser
+check, such as `Use the browser to open https://example.com and report the page
+title only.` If an approval prompt appears, choose **Deny**. Expect the tool to
+be reported as denied and the assistant not to claim it opened the page. This
+case requires a configured Playwright MCP server; start with
+`--mcp-servers time,fetch,playwright` instead of `time,fetch`.
+
+Finally, press Ctrl+C once in the terminal. Expect the process to stop without
+an `ExceptionGroup`, an AnyIO cancel-scope traceback, or an unclosed-resource
+warning. If a request fails, retain the terminal traceback for diagnosis; do
+not share API keys or bot tokens. Do not deliberately exhaust provider quotas
+to test fallback. On an actual HTTP 413/429, the log should say that the
+provider is trying the next model; a missing local fallback model is skipped
+with a warning.
 
 ## Behavioral skills
 

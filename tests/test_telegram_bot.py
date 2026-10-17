@@ -2,14 +2,108 @@
 
 import asyncio
 import logging
+import signal
 import unittest
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
+from typing import AsyncIterator, Callable
 from unittest.mock import AsyncMock, patch
 
+import httpx2
+from openai import APIStatusError
 from agent_herness_build import telegram_bot
+from agent_herness_build.models import MODELS
 
 
 class TelegramBotTests(unittest.TestCase):
+    def test_shutdown_closes_lifespan_resources_in_the_opening_task(self) -> None:
+        async def run() -> None:
+            loop = asyncio.get_running_loop()
+            signal_handlers: dict[signal.Signals, Callable[[], None]] = {}
+            entered_tasks: list[asyncio.Task | None] = []
+            exited_tasks: list[asyncio.Task | None] = []
+
+            resource_stack = AsyncExitStack()
+
+            @asynccontextmanager
+            async def resource() -> AsyncIterator[None]:
+                entered_tasks.append(asyncio.current_task())
+                try:
+                    yield
+                finally:
+                    exited_tasks.append(asyncio.current_task())
+
+            async def post_init(_application: object) -> None:
+                await resource_stack.enter_async_context(resource())
+
+            async def post_shutdown(_application: object) -> None:
+                await resource_stack.aclose()
+
+            async def initialize() -> None:
+                return None
+
+            async def start() -> None:
+                application.running = True
+                signal_handlers[signal.SIGINT]()
+
+            async def stop() -> None:
+                application.running = False
+
+            async def shutdown() -> None:
+                return None
+
+            async def start_polling(**_kwargs: object) -> None:
+                updater.running = True
+
+            async def stop_polling() -> None:
+                updater.running = False
+
+            updater = SimpleNamespace(
+                running=False,
+                start_polling=start_polling,
+                stop=stop_polling,
+            )
+            application = SimpleNamespace(
+                updater=updater,
+                initialize=initialize,
+                post_init=post_init,
+                start=start,
+                running=False,
+                stop=stop,
+                post_stop=None,
+                shutdown=shutdown,
+                post_shutdown=post_shutdown,
+            )
+
+            def add_signal_handler(
+                handled_signal: signal.Signals, callback: Callable[[], None]
+            ) -> None:
+                signal_handlers[handled_signal] = callback
+
+            def remove_signal_handler(handled_signal: signal.Signals) -> bool:
+                signal_handlers.pop(handled_signal, None)
+                return True
+
+            with (
+                patch.object(
+                    loop,
+                    "add_signal_handler",
+                    side_effect=add_signal_handler,
+                ),
+                patch.object(
+                    loop, "remove_signal_handler", side_effect=remove_signal_handler
+                ),
+            ):
+                await telegram_bot._run_application(application)
+
+            self.assertEqual(len(entered_tasks), 1)
+            self.assertEqual(entered_tasks, exited_tasks)
+            self.assertFalse(updater.running)
+            self.assertFalse(application.running)
+
+        asyncio.run(run())
+
     def test_dependency_log_filter_redacts_bot_token(self) -> None:
         record = logging.LogRecord(
             "telegram",
@@ -96,6 +190,98 @@ class TelegramBotTests(unittest.TestCase):
                 run_agent.await_args_list[0].args[1],
                 run_agent.await_args_list[1].args[1],
             )
+
+        asyncio.run(run())
+
+    def test_rate_limit_switches_chat_to_configured_fallback(self) -> None:
+        async def run() -> None:
+            groq = replace(MODELS["groq"], api_key="groq")
+            request = httpx2.Request(
+                "POST", "https://api.groq.com/openai/v1/chat/completions"
+            )
+            error = APIStatusError(
+                "rate limited",
+                response=httpx2.Response(429, request=request),
+                body=None,
+            )
+            runtime = telegram_bot.AgentRuntime(
+                model=groq,
+                client=SimpleNamespace(),
+                tool_schemas=[],
+                mcp_routes={},
+            )
+            message = SimpleNamespace(text="hello", reply_text=AsyncMock())
+            update = SimpleNamespace(
+                effective_user=SimpleNamespace(id=11),
+                effective_chat=SimpleNamespace(id=100),
+                effective_message=message,
+            )
+            context = SimpleNamespace(
+                application=SimpleNamespace(
+                    bot_data={
+                        "allowed_user_ids": frozenset({11}),
+                        "agent_runtime": runtime,
+                    }
+                )
+            )
+            fallback_client = SimpleNamespace()
+            with (
+                patch.dict(MODELS, {"groq": groq}),
+                patch.object(telegram_bot, "check_ollama_model"),
+                patch.object(
+                    telegram_bot,
+                    "run_agent",
+                    new_callable=AsyncMock,
+                    side_effect=[error, "fallback reply"],
+                ) as run_agent,
+                patch.object(telegram_bot, "AsyncOpenAI", return_value=fallback_client),
+                patch.object(telegram_bot, "load_memory", return_value=""),
+            ):
+                await telegram_bot._handle_message(update, context)
+
+            self.assertEqual(run_agent.await_count, 2)
+            self.assertIs(run_agent.await_args_list[1].args[2], fallback_client)
+            self.assertEqual(runtime.chat_models[(100, 11)][0], "local")
+            message.reply_text.assert_awaited_once_with("fallback reply")
+
+        asyncio.run(run())
+
+    def test_agent_failure_logs_exception_details(self) -> None:
+        async def run() -> None:
+            runtime = telegram_bot.AgentRuntime(
+                model=MODELS["groq"],
+                client=SimpleNamespace(),
+                tool_schemas=[],
+                mcp_routes={},
+            )
+            message = SimpleNamespace(text="hello", reply_text=AsyncMock())
+            update = SimpleNamespace(
+                effective_user=SimpleNamespace(id=11),
+                effective_chat=SimpleNamespace(id=100),
+                effective_message=message,
+            )
+            context = SimpleNamespace(
+                application=SimpleNamespace(
+                    bot_data={
+                        "allowed_user_ids": frozenset({11}),
+                        "agent_runtime": runtime,
+                    }
+                )
+            )
+            with (
+                patch.object(
+                    telegram_bot,
+                    "run_agent",
+                    new_callable=AsyncMock,
+                    side_effect=RuntimeError("Agent exceeded the tool-round limit"),
+                ),
+                patch.object(telegram_bot, "load_memory", return_value=""),
+                self.assertLogs(telegram_bot.logger, level="ERROR") as captured,
+            ):
+                await telegram_bot._handle_message(update, context)
+
+            self.assertIn("Agent exceeded the tool-round limit", captured.output[0])
+            message.reply_text.assert_awaited_once()
 
         asyncio.run(run())
 

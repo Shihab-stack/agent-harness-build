@@ -6,11 +6,12 @@ import logging
 import math
 import os
 import secrets
+import signal
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
-from openai import AsyncOpenAI
+from openai import APIStatusError, AsyncOpenAI
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -28,6 +29,8 @@ from agent_herness_build.models import (
     MODELS,
     ModelConfig,
     check_ollama_model,
+    fallback_models,
+    required_api_key,
 )
 from agent_herness_build.tools.files import FILE_TOOL_SCHEMAS
 from agent_herness_build.tools.memory import MEMORY_TOOL, load_memory
@@ -72,6 +75,10 @@ class AgentRuntime:
         default_factory=dict
     )
     stack: AsyncExitStack | None = None
+    chat_models: dict[
+        tuple[int, int], tuple[str, ModelConfig, AsyncOpenAI]
+    ] = field(default_factory=dict)
+    extra_clients: list[AsyncOpenAI] = field(default_factory=list)
 
 
 @dataclass
@@ -288,27 +295,94 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     lock = runtime.chat_locks.setdefault(key, asyncio.Lock())
     async with lock:
         history = runtime.histories.setdefault(key, [])
-        try:
-            answer = await run_agent(
-                message.text,
-                history,
-                runtime.client,
-                runtime.model,
-                runtime.tool_schemas,
-                runtime.mcp_routes,
-                load_memory(),
-                confirm_action=lambda tool, description: _request_confirmation(
-                    update, context, tool, description
+        model_name, model, client = runtime.chat_models.get(
+            key, (
+                next(
+                    (
+                        name for name, config in MODELS.items()
+                        if config == runtime.model
+                    ),
+                    DEFAULT_MODEL,
                 ),
+                runtime.model,
+                runtime.client,
             )
-            _trim_history(history)
-            await _send_text(message, answer)
-        except Exception as exc:
-            logger.warning("Telegram agent request failed (%s)", type(exc).__name__)
-            await message.reply_text(
-                "Sorry, the assistant couldn't complete that request. "
-                "Check the harness logs and try again."
-            )
+        )
+        candidates = [model_name]
+        while candidates:
+            selected_model = candidates.pop(0)
+            selected_config = MODELS[selected_model]
+            if selected_model != model_name and selected_model.startswith("local"):
+                try:
+                    await asyncio.to_thread(
+                        check_ollama_model,
+                        selected_config.base_url,
+                        selected_config.model,
+                    )
+                except RuntimeError as exc:
+                    logger.warning("Skipping fallback model (%s)", type(exc).__name__)
+                    continue
+            if selected_model != model_name:
+                model_name = selected_model
+                model = selected_config
+                client = AsyncOpenAI(
+                    base_url=model.base_url, api_key=model.api_key
+                )
+                runtime.extra_clients.append(client)
+                runtime.chat_models[key] = (model_name, model, client)
+                logger.info("Switched chat to fallback model %s", model_name)
+            try:
+                answer = await run_agent(
+                    message.text,
+                    history,
+                    client,
+                    model,
+                    runtime.tool_schemas,
+                    runtime.mcp_routes,
+                    load_memory(),
+                    confirm_action=lambda tool, description: _request_confirmation(
+                        update, context, tool, description
+                    ),
+                )
+                runtime.chat_models[key] = (model_name, model, client)
+                _trim_history(history)
+                await _send_text(message, answer)
+                return
+            except APIStatusError as exc:
+                fallbacks = fallback_models(model_name, exc.status_code)
+                if fallbacks:
+                    candidates = fallbacks
+                    reason = (
+                        "rejected the request size"
+                        if exc.status_code == 413
+                        else "reached its rate or usage limit"
+                    )
+                    logger.warning(
+                        "%s %s; trying next model",
+                        model_name,
+                        reason,
+                    )
+                    continue
+                error_text = (
+                    "Sorry, the assistant couldn't complete that request. "
+                    "Check the harness logs and try again."
+                )
+                logger.warning(
+                    "Telegram agent request failed (HTTP %s)",
+                    exc.status_code,
+                    exc_info=True,
+                )
+                await message.reply_text(error_text)
+                return
+            except Exception as exc:
+                logger.exception(
+                    "Telegram agent request failed (%s)", type(exc).__name__
+                )
+                await message.reply_text(
+                    "Sorry, the assistant couldn't complete that request. "
+                    "Check the harness logs and try again."
+                )
+                return
 
 
 async def _handle_error(
@@ -343,6 +417,9 @@ def create_application(
             f"Unknown model '{model_name}'. Available: {', '.join(MODELS)}"
         )
     model = MODELS[model_name]
+    if not model_name.startswith("local") and not model.api_key.strip():
+        required_key = required_api_key(model_name)
+        raise ValueError(f"Model '{model_name}' requires {required_key}.")
 
     async def post_init(application: Application) -> None:
         if model_name.startswith("local"):
@@ -374,7 +451,8 @@ def create_application(
         runtime = application.bot_data.get("agent_runtime")
         if runtime is not None:
             try:
-                await runtime.client.close()
+                clients = [runtime.client, *runtime.extra_clients]
+                await asyncio.gather(*(client.close() for client in clients))
             finally:
                 if runtime.stack is not None:
                     await runtime.stack.aclose()
@@ -397,6 +475,75 @@ def create_application(
     )
     application.add_error_handler(_handle_error)
     return application
+
+
+async def _run_application(application: Application) -> None:
+    """Run Telegram lifecycle hooks in one task so MCP contexts close safely."""
+    if application.updater is None:
+        raise RuntimeError("Telegram application has no updater")
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    handled_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGABRT)
+    registered_signals: list[signal.Signals] = []
+    for handled_signal in handled_signals:
+        try:
+            loop.add_signal_handler(handled_signal, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            logger.debug("Signal handler unavailable for %s", handled_signal.name)
+        else:
+            registered_signals.append(handled_signal)
+
+    try:
+        await application.initialize()
+        if application.post_init is not None:
+            await application.post_init(application)
+
+        def handle_polling_error(error: Exception) -> None:
+            application.create_task(
+                application.process_error(error=error, update=None)
+            )
+
+        await application.updater.start_polling(
+            drop_pending_updates=True,
+            error_callback=handle_polling_error,
+        )
+        await application.start()
+        await stop_event.wait()
+    finally:
+        for handled_signal in registered_signals:
+            try:
+                loop.remove_signal_handler(handled_signal)
+            except (NotImplementedError, RuntimeError) as exc:
+                logger.warning(
+                    "Could not remove signal handler for %s (%s)",
+                    handled_signal.name,
+                    type(exc).__name__,
+                )
+
+        async def cleanup(
+            label: str, operation: Callable[[], Awaitable[None]]
+        ) -> None:
+            try:
+                await operation()
+            except Exception:
+                logger.exception("Telegram %s cleanup failed", label)
+
+        if application.updater.running:
+            await cleanup("polling", application.updater.stop)
+        application_was_running = application.running
+        if application_was_running:
+            await cleanup("application", application.stop)
+            post_stop = application.post_stop
+            if post_stop is not None:
+                await cleanup("post-stop hook", lambda: post_stop(application))
+        await cleanup("shutdown", application.shutdown)
+        post_shutdown = application.post_shutdown
+        if post_shutdown is not None:
+            await cleanup(
+                "post-shutdown hook",
+                lambda: post_shutdown(application),
+            )
 
 
 def main() -> None:
@@ -445,7 +592,10 @@ def main() -> None:
     redaction_filter = _TokenRedactionFilter(token)
     for handler in logging.getLogger().handlers:
         handler.addFilter(redaction_filter)
-    application.run_polling(drop_pending_updates=True)
+    try:
+        asyncio.run(_run_application(application))
+    except KeyboardInterrupt:
+        print("\nGoodbye.")
 
 
 if __name__ == "__main__":

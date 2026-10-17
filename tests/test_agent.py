@@ -105,6 +105,10 @@ class AgentToolDispatchTests(unittest.TestCase):
         self.assertEqual(answer, "done")
         self.assertEqual(tokens, ["done"])
         self.assertEqual(
+            client.chat.completions.create.await_args_list[0].kwargs["max_tokens"],
+            2048,
+        )
+        self.assertEqual(
             [message["role"] for message in messages],
             ["system", "user", "assistant", "tool", "assistant"],
         )
