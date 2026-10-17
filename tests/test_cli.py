@@ -15,6 +15,33 @@ from agent_herness_build import cli, conversations
 
 
 class CLITests(unittest.TestCase):
+    def test_mcp_server_selection_parser(self) -> None:
+        self.assertEqual(cli.parse_mcp_servers("time, fetch"), {"time", "fetch"})
+        with self.assertRaisesRegex(cli.argparse.ArgumentTypeError, "must not be repeated"):
+            cli.parse_mcp_servers("time,time")
+        with self.assertRaisesRegex(cli.argparse.ArgumentTypeError, "comma-separated"):
+            cli.parse_mcp_servers("time,,fetch")
+
+    def test_mcp_confirmation_defaults_to_deny(self) -> None:
+        output = io.StringIO()
+        with (
+            patch("builtins.input", return_value="n"),
+            redirect_stdout(output),
+        ):
+            self.assertFalse(
+                cli.confirm_mcp_action("mcp_calendar_create_event", "Create an event")
+            )
+        self.assertIn("Action denied", output.getvalue())
+
+    def test_mcp_confirmation_denies_when_input_is_unavailable(self) -> None:
+        with (
+            patch("builtins.input", side_effect=EOFError),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertFalse(
+                cli.confirm_mcp_action("mcp_calendar_create_event", "Create an event")
+            )
+
     def test_help_command_lists_available_commands(self) -> None:
         output = io.StringIO()
         with redirect_stdout(output):

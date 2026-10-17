@@ -27,6 +27,7 @@ src/agent_herness_build/
   agent.py                       Model/tool conversation loop
   models.py                      Local and optional cloud model settings
   mcp.py                         MCP configuration, connections, and routing
+  telegram_bot.py                Telegram long-polling chat interface
   skills.py                      On-demand behavioral skill loading
   paths.py                       Shared project/config/workspace paths
   sandbox_mcp.py                 Docker-isolated Python execution MCP server
@@ -40,6 +41,8 @@ examples/
   v1.py ... v4.py                 Step-by-step tool-agent examples
 workspace/                        Your files and saved memory
 tests/                             Offline unit tests
+scripts/
+  evaluate_tool_use.py           Opt-in Ollama tool-use evaluation
 ```
 
 Python application code is under `src/`; sample configuration is under
@@ -82,7 +85,7 @@ Clone this repository from GitHub (replace `YOUR-USERNAME` with the account
 that owns the repository), then enter the project folder:
 
 ```sh
-git clone https://github.com/YOUR-USERNAME/agent-harness-build.git
+git clone https://github.com/Shihab-stack/agent-harness-build.git
 cd agent-harness-build
 ```
 
@@ -128,6 +131,20 @@ Run without starting MCP servers (local file and memory tools still work):
 uv run --no-editable agent-harness-build --no-mcp
 ```
 
+To reduce MCP tool count for a small model, choose only the servers needed for
+that session. The default remains all configured servers:
+
+```sh
+uv run --no-editable agent-harness-build --mcp-servers time,fetch
+```
+
+Each MCP server gets an independent 20-second startup timeout by default. If a
+server fails, times out, or exposes an invalid tool schema, the harness reports
+the failure and continues with other configured servers; configured MCP
+servers are optional and none is treated as required. Override the timeout with
+`--mcp-startup-timeout SECONDS` or `AGENT_MCP_STARTUP_TIMEOUT`. Use `/tools` to
+see the tools actually available.
+
 Before starting, the CLI checks that Ollama is reachable and that the selected
 local model is installed. If the model is missing, install it using the
 suggested `ollama pull <model>` command or select one already installed with
@@ -171,6 +188,65 @@ generated files before using them as project changes.
 Use `list_project_files` and `read_project_file` to inspect the approved
 project files.
 
+### Telegram bot
+
+The optional Telegram interface uses long polling, so it does not require a
+public server or webhook. Create a bot with [@BotFather](https://t.me/BotFather)
+using `/newbot`, then copy the token privately. Find your numeric Telegram user
+ID using a trusted method. The bot refuses to start unless both the bot token
+and at least one allowed user ID are configured.
+
+From the repository root, install/sync dependencies:
+
+```sh
+uv sync --no-editable
+```
+
+Set the token and allowlist in the same terminal session. On macOS (zsh), enter
+the token without displaying it:
+
+```zsh
+read -s "TELEGRAM_BOT_TOKEN?Paste your private bot token: "
+echo
+export TELEGRAM_BOT_TOKEN
+export TELEGRAM_ALLOWED_USER_IDS='123456789'
+```
+
+On Linux (bash):
+
+```bash
+read -r -s -p 'Paste your private bot token: ' TELEGRAM_BOT_TOKEN
+printf '\n'
+export TELEGRAM_BOT_TOKEN
+export TELEGRAM_ALLOWED_USER_IDS='123456789'
+```
+
+On Windows PowerShell:
+
+```powershell
+$secureToken = Read-Host -AsSecureString 'Paste your private bot token'
+$env:TELEGRAM_BOT_TOKEN = [System.Net.NetworkCredential]::new('', $secureToken).Password
+$env:TELEGRAM_ALLOWED_USER_IDS = '123456789'
+```
+
+Replace the example ID with your numeric Telegram user ID; separate multiple
+authorized IDs with commas. Do not commit the token or put it in the MCP
+configuration. Start the bot with:
+
+```sh
+uv run --no-editable agent-harness-telegram
+```
+
+The Telegram bot uses the same model configuration and local/MCP tools as the
+CLI. Its default local model requires Ollama to be running with the configured
+model installed. Use `--no-mcp` to disable MCP servers, or `--model local-small`
+to choose the smaller local model. MCP actions without a read-only annotation
+require an inline Approve/Deny response; no response within 60 seconds denies
+the action. Use `/reset` in a chat to clear that chat's in-memory conversation.
+The bot does not persist Telegram conversation history across restarts. Keep
+the computer awake, connected to the internet, and the bot process running for
+Telegram long polling to receive messages.
+
 ## Behavioral skills
 
 Skills are Markdown workflows under the project-root `skills/` directory.
@@ -198,14 +274,14 @@ inspect or verify.
 
 The assistant reads `config/mcp_servers.json` when it exists; otherwise it
 uses `config/mcp_servers.example.json`. The example starts time and fetch via
-`uvx`, memory, GitHub, Context7, and Playwright via `npx`, and the Python
-sandbox via `uv`. Context7 provides library documentation tools; the headless
-Playwright MCP provides browser automation for navigation and web-app testing.
-The Sequential Thinking MCP exposes a tool for structuring complex problem
-solving; it does not guarantee correct answers or replace independent
-verification. First startup may download MCP packages and needs internet
-access. Playwright may also need its Chromium browser installed on the host
-(for example, `npx playwright install chromium`). Set
+version-pinned `uvx` and `npx` packages, and the Python sandbox via `uv`.
+Context7 provides library documentation tools; the headless Playwright MCP
+provides browser automation for navigation and web-app testing. Sequential
+Thinking exposes a tool for structuring complex problem solving; it does not
+guarantee correct answers or replace independent verification. First startup
+may download MCP packages and needs internet access. Playwright may also need
+its Chromium browser installed on the host (for example,
+`npx playwright install chromium`). Set
 `GITHUB_PERSONAL_ACCESS_TOKEN` in the environment before launching the
 assistant to authenticate the GitHub server; do not put personal access
 tokens in the config file. You can customize server commands by copying the
@@ -216,7 +292,42 @@ cp config/mcp_servers.example.json config/mcp_servers.json
 ```
 
 The local config is git-ignored so personal settings stay out of commits.
+When present, `config/mcp_servers.json` replaces the example config completely;
+it does not inherit new entries or package versions from the example. Review
+and update it yourself when changing MCPs, without copying credentials into
+the example.
 Use `--no-mcp` to skip MCP startup if you only need local tools.
+
+The example config pins the following upstream MCP package versions:
+
+| Package | Pinned version |
+|---|---:|
+| `mcp-server-time` | `2026.10.10` |
+| `mcp-server-fetch` | `2026.10.10` |
+| `@modelcontextprotocol/server-memory` | `1.0.0` |
+| `@modelcontextprotocol/server-github` | `2025.4.8` |
+| `@upstash/context7-mcp` | `4.4.2` |
+| `@playwright/mcp` | `0.0.83` |
+| `@modelcontextprotocol/server-sequential-thinking` | `1.0.0` |
+
+These versions were checked against the package registries when this
+configuration was updated. To deliberately update a version, check the
+registry's published version and changelog, edit the example configuration,
+update `tests/test_mcp_config.py`, run the test suite, and then consciously
+mirror the change into your ignored local configuration if desired. For
+example, use `npm view <package> version` for npm packages and
+`curl https://pypi.org/pypi/<package>/json` for PyPI packages.
+These are direct package pins; `npx` and `uvx` may still resolve transitive
+dependency version ranges. Fully locking transitive dependencies would require
+maintaining a lockfile or image for each external MCP server.
+
+MCP tools marked with a read-only annotation can run without a prompt. Tools
+that are marked potentially mutating or have no read-only annotation require
+an explicit interactive confirmation immediately before execution; declining
+or lacking an interactive prompt prevents the call. MCP annotations are
+server-provided hints, not a security boundary, so only connect servers you
+trust. Tool logs show tool names and status, not argument values or full
+results.
 
 Example requests when the configured servers are connected:
 
@@ -319,9 +430,31 @@ Run the offline unit tests with Python's built-in test runner:
 uv run --no-editable python -m unittest discover -s tests -v
 ```
 
-Tests do not call Ollama or launch MCP servers. They cover the local tools,
-conversation save/restore, CLI commands, model checks, streaming/tool dispatch,
-and file-overwrite confirmation.
+The default tests do not call Ollama or launch MCP servers. MCP servers have
+also been tested separately; those live checks are not part of the default
+suite and do not guarantee that a server is currently available. The unit tests
+cover local tools, MCP configuration and startup failure handling, confirmation
+gates, conversation save/restore, CLI commands, model checks, streaming/tool
+dispatch, and file boundaries.
+
+An opt-in tool-use evaluation calls the configured local Ollama model but uses
+deterministic in-process tool simulators; it does not launch live MCP servers.
+It checks tool selection, evidence use, and honest handling of tool errors. The
+model's consequential-action request is reported as `SKIP` if it doesn't make
+that tool call; the harness's confirmation gate is tested separately and
+deterministically, independent of model behavior. An empty final answer is
+reported as a separate model-response failure, even if the action-request case
+is skipped. Run it from the project root:
+
+```sh
+uv run --no-sync python scripts/evaluate_tool_use.py
+```
+
+The evaluation uses `OLLAMA_MODEL` by default and accepts `AGENT_EVAL_MODEL`
+to select another installed model. It reports the model, endpoint, individual
+case results, and passed/failed/skipped counts. It requires Ollama and the
+selected model; it is intentionally excluded from the default offline test
+suite.
 
 ## Publish this project to GitHub
 
@@ -411,10 +544,12 @@ git push
 | `OLLAMA_MODEL` | Override the default local model |
 | `OLLAMA_SMALL_MODEL` | Override the smaller local model |
 | `OLLAMA_BASE_URL` | Change the Ollama OpenAI-compatible endpoint |
+| `AGENT_MCP_STARTUP_TIMEOUT` | Per-server MCP startup timeout in seconds (default 20) |
 | `OPENAI_API_KEY` | Enable the optional OpenAI backend |
 | `OPENAI_MODEL` | Override the OpenAI model name |
 | `ANTHROPIC_API_KEY` | Enable the optional Anthropic backend |
 | `ANTHROPIC_MODEL` | Override the Anthropic model name |
+| `AGENT_EVAL_MODEL` | Select the Ollama model for the opt-in tool-use evaluation |
 | `AGENT_PROJECT_ROOT` | Explicitly select the checkout/data root |
 | `AGENT_WORKSPACE` | Override the assistant's user-data folder |
 | `AGENT_CONFIG_DIR` | Override the MCP configuration folder |

@@ -11,10 +11,12 @@ dependencies = [
     "mcp>=2.3.0",
     "openai>=3.31.0",
     "pydantic>=2.14.1",
+    "python-telegram-bot>=22.5,<23",
 ]
 
 [project.scripts]
 agent-harness-build = "agent_herness_build.cli:main"
+agent-harness-telegram = "agent_herness_build.telegram_bot:main"
 
 [build-system]
 requires = ["uv_build>=0.13.1,<0.14.0"]

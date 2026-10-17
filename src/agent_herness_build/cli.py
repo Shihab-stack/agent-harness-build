@@ -2,13 +2,14 @@
 
 import argparse
 import asyncio
+import os
 from contextlib import AsyncExitStack
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from agent_herness_build.agent import LOCAL_TOOLS, run_agent
 from agent_herness_build.conversations import load_conversation, save_conversation
-from agent_herness_build.mcp import connect_mcp
+from agent_herness_build.mcp import DEFAULT_STARTUP_TIMEOUT, connect_mcp
 from agent_herness_build.models import DEFAULT_MODEL, MODELS, check_ollama_model
 from agent_herness_build.skills import list_skills, load_skill
 from agent_herness_build.tools.files import FILE_TOOL_SCHEMAS
@@ -28,6 +29,21 @@ def print_tools(tool_schemas: list[dict]) -> None:
         function = schema["function"]
         origin = "local" if function["name"] in LOCAL_TOOLS else "mcp"
         print(f"  [{origin}] {function['name']}: {function.get('description', '')}")
+
+
+def confirm_mcp_action(tool_name: str, description: str) -> bool:
+    """Require interactive approval for an MCP tool that may mutate state."""
+    print(f"\nMCP action requires confirmation: {tool_name}")
+    print(f"Operation: {description}")
+    try:
+        answer = input("Allow this action? [y/N] ").strip().lower()
+    except EOFError:
+        print("Confirmation unavailable; action denied.")
+        return False
+    if answer not in {"y", "yes"}:
+        print("Action denied.")
+        return False
+    return True
 
 
 def handle_skill_command(line: str, active_skill: str | None) -> tuple[bool, str | None]:
@@ -108,7 +124,12 @@ def request_error_message(error: Exception, backend: str, model: str) -> str:
     return f"Could not reach the {backend} model service: {error}"
 
 
-async def run_cli(initial_model: str, enable_mcp: bool) -> None:
+async def run_cli(
+    initial_model: str,
+    enable_mcp: bool,
+    selected_mcp_servers: set[str] | None = None,
+    mcp_startup_timeout: float = DEFAULT_STARTUP_TIMEOUT,
+) -> None:
     """Connect tools and run a conversation until the user exits."""
     if initial_model not in MODELS:
         available = ", ".join(MODELS)
@@ -125,9 +146,14 @@ async def run_cli(initial_model: str, enable_mcp: bool) -> None:
     messages: list[dict] = []
     async with AsyncExitStack() as stack:
         if enable_mcp:
-            mcp_schemas, mcp_routes = await connect_mcp(stack)
+            mcp_schemas, mcp_routes = await connect_mcp(
+                stack,
+                selected_servers=selected_mcp_servers,
+                startup_timeout=mcp_startup_timeout,
+            )
         else:
             mcp_schemas, mcp_routes = [], {}
+            print("  [mcp] all servers disabled (--no-mcp)")
         tool_schemas = [*local_schemas, *mcp_schemas]
         print(
             f"\nAgent ready — model: {active_model} "
@@ -201,6 +227,7 @@ async def run_cli(initial_model: str, enable_mcp: bool) -> None:
                         load_memory(),
                         on_token=lambda text: print(text, end="", flush=True),
                         active_skill=active_skill,
+                        confirm_action=confirm_mcp_action,
                     )
                     print("\n")
                 except (APIConnectionError, APITimeoutError, APIStatusError) as exc:
@@ -228,8 +255,44 @@ def main() -> None:
         action="store_true",
         help="start without MCP servers; local file and memory tools remain available",
     )
+    parser.add_argument(
+        "--mcp-servers",
+        type=parse_mcp_servers,
+        metavar="NAME,NAME",
+        help="enable only these configured MCP servers (default: all)",
+    )
+    parser.add_argument(
+        "--mcp-startup-timeout",
+        type=float,
+        default=os.environ.get(
+            "AGENT_MCP_STARTUP_TIMEOUT", str(DEFAULT_STARTUP_TIMEOUT)
+        ),
+        metavar="SECONDS",
+        help="per-server startup timeout (default: AGENT_MCP_STARTUP_TIMEOUT or 20)",
+    )
     args = parser.parse_args()
+    if args.no_mcp and args.mcp_servers is not None:
+        parser.error("--mcp-servers cannot be used together with --no-mcp")
+    if args.mcp_startup_timeout <= 0:
+        parser.error("--mcp-startup-timeout must be positive")
     try:
-        asyncio.run(run_cli(args.model, enable_mcp=not args.no_mcp))
-    except RuntimeError as exc:
+        asyncio.run(
+            run_cli(
+                args.model,
+                enable_mcp=not args.no_mcp,
+                selected_mcp_servers=args.mcp_servers,
+                mcp_startup_timeout=args.mcp_startup_timeout,
+            )
+        )
+    except (RuntimeError, ValueError) as exc:
         parser.exit(1, f"{parser.prog}: error: {exc}\n")
+
+
+def parse_mcp_servers(value: str) -> set[str]:
+    """Parse a comma-separated MCP server allowlist."""
+    names = [name.strip() for name in value.split(",")]
+    if any(not name for name in names):
+        raise argparse.ArgumentTypeError("provide comma-separated server names")
+    if len(set(names)) != len(names):
+        raise argparse.ArgumentTypeError("server names must not be repeated")
+    return set(names)

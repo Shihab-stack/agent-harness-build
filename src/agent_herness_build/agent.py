@@ -2,7 +2,7 @@
 
 import inspect
 import json
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from openai import AsyncOpenAI
 
@@ -26,7 +26,9 @@ Python MCP server. Use only provided tools for time and web fetch tasks. Be
 clear about tool errors. For library/framework questions, consult Context7's
 version-specific documentation tools when available. For browser or web-app
 tasks, use the Playwright MCP tools when available and report what was actually
-tested.
+tested. MCP tools that are not explicitly marked read-only require user
+confirmation; if an action is denied, do not retry it or claim it succeeded.
+Do not repeat credentials or sensitive tool arguments in the final response.
 
 Remembered facts:
 {memory}"""
@@ -48,6 +50,28 @@ async def call_tool(
     return await call_mcp_tool(name, args, mcp_routes)
 
 
+async def _confirm_mcp_tool(
+    name: str,
+    routes: dict[str, MCPRoute],
+    confirm_action: Callable[[str, str], bool | Awaitable[bool]] | None,
+) -> bool:
+    route = routes.get(name)
+    if route is None or not route.requires_confirmation:
+        return True
+    if confirm_action is None:
+        return False
+    approved = confirm_action(name, route.description)
+    if inspect.isawaitable(approved):
+        return await approved
+    return approved
+
+
+def _tool_log_name(name: str, mcp_routes: dict[str, MCPRoute]) -> str:
+    if name in LOCAL_TOOLS or name in mcp_routes:
+        return name
+    return "unregistered"
+
+
 async def run_agent(
     prompt: str,
     messages: list[dict[str, Any]],
@@ -58,6 +82,8 @@ async def run_agent(
     memory: str,
     on_token: Callable[[str], None] | None = None,
     active_skill: str | None = None,
+    confirm_action: Callable[[str, str], bool | Awaitable[bool]] | None = None,
+    temperature: float | None = None,
 ) -> str:
     """Stream a turn, run any requested tools, and retain completed history."""
     previous_messages = list(messages)
@@ -80,11 +106,15 @@ async def run_agent(
     completed = False
     try:
         for _ in range(MAX_TOOL_ROUNDS):
+            request_options: dict[str, Any] = {}
+            if temperature is not None:
+                request_options["temperature"] = temperature
             response = await client.chat.completions.create(
                 model=model.model,
                 messages=messages,
                 tools=tool_schemas or None,
                 stream=True,
+                **request_options,
             )
             tool_calls: dict[int, dict[str, Any]] = {}
             answer_parts: list[str] = []
@@ -136,12 +166,43 @@ async def run_agent(
                     if not isinstance(arguments, dict):
                         result = "tool error: arguments must be a JSON object"
                     else:
-                        print(
-                            f"  [tool] {tool_call['function']['name']}({arguments})"
-                        )
-                        result = await call_tool(
-                            tool_call["function"]["name"], arguments, mcp_routes
-                        )
+                        tool_name = tool_call["function"]["name"]
+                        log_name = _tool_log_name(tool_name, mcp_routes)
+                        result = ""
+                        try:
+                            approved = await _confirm_mcp_tool(
+                                tool_name, mcp_routes, confirm_action
+                            )
+                        except Exception as exc:
+                            result = (
+                                f"tool not run: confirmation failed "
+                                f"({type(exc).__name__})"
+                            )
+                            approved = False
+                        if not approved and not result:
+                            result = (
+                                "tool not run: confirmation was denied or unavailable"
+                            )
+                            print(f"  [tool] denied {log_name}")
+                        elif not approved:
+                            print(f"  [tool] confirmation failed {log_name}")
+                        elif approved:
+                            print(f"  [tool] calling {log_name}")
+                            try:
+                                result = await call_tool(
+                                    tool_name, arguments, mcp_routes
+                                )
+                            except Exception as exc:
+                                result = (
+                                    f"tool error calling {tool_name}: "
+                                    f"{type(exc).__name__}: {exc}"
+                                )
+                            status = (
+                                "failed"
+                                if result.startswith(("error:", "tool error"))
+                                else "completed"
+                            )
+                            print(f"  [tool] {status} {log_name}")
                 messages.append(
                     {
                         "role": "tool",

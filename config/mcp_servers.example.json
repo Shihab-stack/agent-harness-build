@@ -2,44 +2,55 @@
   "mcpServers": {
     "time": {
       "command": "uvx",
-      "args": ["mcp-server-time"]
+      "args": [
+        "--from",
+        "mcp-server-time==2026.10.10",
+        "mcp-server-time"
+      ]
     },
     "fetch": {
       "command": "uvx",
-      "args": ["mcp-server-fetch"]
+      "args": [
+        "--from",
+        "mcp-server-fetch==2026.10.10",
+        "mcp-server-fetch"
+      ]
     },
     "memory": {
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-memory"
+        "@modelcontextprotocol/server-memory@1.0.0"
       ]
     },
     "github": {
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-github"
+        "@modelcontextprotocol/server-github@2025.4.8"
       ]
     },
     "context7": {
       "command": "npx",
       "args": [
         "-y",
-        "@upstash/context7-mcp"
+        "@upstash/context7-mcp@4.4.2"
       ]
     },
     "playwright": {
       "command": "npx",
       "args": [
         "-y",
-        "@playwright/mcp@latest",
+        "@playwright/mcp@0.0.83",
         "--headless"
       ]
     },
     "sequential-thinking": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"]
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking@1.0.0"
+      ]
     },
     "sandbox": {
       "command": "uv",

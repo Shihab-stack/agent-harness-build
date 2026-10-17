@@ -1,19 +1,44 @@
 """Tests for local tool dispatch in the agent loop."""
 
 import asyncio
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from agent_herness_build.agent import call_tool, run_agent
+from agent_herness_build.agent import _confirm_mcp_tool, call_tool, run_agent
+from agent_herness_build.mcp import MCPRoute
 from agent_herness_build.models import ModelConfig
 from agent_herness_build.tools import files
 
 
 class AgentToolDispatchTests(unittest.TestCase):
     """Check expected local tool errors without involving a model server."""
+
+    def test_async_confirmation_callback_is_awaited(self) -> None:
+        async def run() -> None:
+            session = AsyncMock()
+            route = MCPRoute(
+                session=session,
+                server_tool_name="create_event",
+                description="Create an event",
+                requires_confirmation=True,
+            )
+            confirm = AsyncMock(return_value=True)
+            approved = await _confirm_mcp_tool(
+                "mcp_calendar_create_event",
+                {"mcp_calendar_create_event": route},
+                confirm,
+            )
+            self.assertTrue(approved)
+            confirm.assert_awaited_once_with(
+                "mcp_calendar_create_event", "Create an event"
+            )
+
+        asyncio.run(run())
 
     def test_invalid_local_tool_arguments_are_reported(self) -> None:
         """Unexpected arguments become a tool error instead of a crash."""
@@ -150,6 +175,71 @@ class AgentToolDispatchTests(unittest.TestCase):
             messages[0]["content"],
         )
         self.assertIn("Always verify the exact failing behavior.", messages[0]["content"])
+
+    def test_denied_mcp_action_is_not_called_or_logged_with_arguments(self) -> None:
+        async def stream(*chunks):
+            for chunk in chunks:
+                yield chunk
+
+        tool_call = SimpleNamespace(
+            index=0,
+            id="call-write",
+            function=SimpleNamespace(
+                name="mcp_calendar_create_event",
+                arguments='{"private_note":"do-not-log-this"}',
+            ),
+        )
+        tool_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content=None, tool_calls=[tool_call])
+                )
+            ]
+        )
+        answer_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content="The action was not run.", tool_calls=None
+                    )
+                )
+            ]
+        )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock(
+                        side_effect=[stream(tool_chunk), stream(answer_chunk)]
+                    )
+                )
+            )
+        )
+        session = AsyncMock()
+        route = MCPRoute(
+            session=session,
+            server_tool_name="create_event",
+            description="Create a calendar event",
+            requires_confirmation=True,
+        )
+        messages: list[dict] = []
+        output = io.StringIO()
+        with redirect_stdout(output):
+            asyncio.run(
+                run_agent(
+                    "Create an event.",
+                    messages,
+                    client,
+                    ModelConfig("http://localhost:11434/v1", "ollama", "test"),
+                    [],
+                    {"mcp_calendar_create_event": route},
+                    "(none)",
+                    confirm_action=lambda _name, _description: False,
+                )
+            )
+
+        session.call_tool.assert_not_awaited()
+        self.assertNotIn("do-not-log-this", output.getvalue())
+        self.assertIn("confirmation was denied", str(messages))
 
 
 if __name__ == "__main__":
