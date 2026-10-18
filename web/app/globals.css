@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body { height: 100%; }
+body { @apply bg-zinc-950 text-zinc-100 antialiased; }
+
+.md p { @apply my-2 leading-relaxed; }
+.md ul { @apply my-2 list-disc pl-5; }
+.md ol { @apply my-2 list-decimal pl-5; }
+.md a { @apply text-sky-400 underline; }
+.md h1, .md h2, .md h3 { @apply mt-3 mb-1 font-semibold; }
+.md code { @apply rounded bg-zinc-800 px-1 py-0.5 text-[0.85em]; }
+.md pre { @apply my-2 overflow-x-auto rounded-lg bg-zinc-900 p-3 text-sm; }
+.md pre code { @apply bg-transparent p-0; }
+.md table { @apply my-2 text-sm; }
+.md th, .md td { @apply border border-zinc-700 px-2 py-1; }

@@ -23,3 +23,7 @@ config/mcp_servers.json
 
 # Local assistant data may contain personal information
 workspace/
+node_modules/
+.next/
+node_modules/
+.next/
