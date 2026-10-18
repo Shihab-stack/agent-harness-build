@@ -15,6 +15,9 @@ dependencies = [
     { name = "openai" },
     { name = "pydantic" },
     { name = "python-telegram-bot" },
+    { name = "sse-starlette" },
+    { name = "starlette" },
+    { name = "uvicorn" },
 ]
 
 [package.metadata]
@@ -23,6 +26,9 @@ requires-dist = [
     { name = "openai", specifier = ">=3.31.0" },
     { name = "pydantic", specifier = ">=2.14.1" },
     { name = "python-telegram-bot", specifier = ">=22.5,<23" },
+    { name = "sse-starlette", specifier = ">=3.5.0" },
+    { name = "starlette", specifier = ">=1.8.0" },
+    { name = "uvicorn", specifier = ">=0.54.0" },
 ]
 
 [[package]]

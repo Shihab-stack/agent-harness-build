@@ -84,6 +84,7 @@ async def run_agent(
     active_skill: str | None = None,
     confirm_action: Callable[[str, str], bool | Awaitable[bool]] | None = None,
     temperature: float | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """Stream a turn, run any requested tools, and retain completed history."""
     previous_messages = list(messages)
@@ -185,10 +186,15 @@ async def run_agent(
                                 "tool not run: confirmation was denied or unavailable"
                             )
                             print(f"  [tool] denied {log_name}")
+                            if on_event:
+                                on_event({"type": "tool", "name": log_name, "status": "denied"})
                         elif not approved:
                             print(f"  [tool] confirmation failed {log_name}")
                         elif approved:
                             print(f"  [tool] calling {log_name}")
+
+                            if on_event:
+                                on_event({"type": "tool", "name": log_name, "status": "running"})
                             try:
                                 result = await call_tool(
                                     tool_name, arguments, mcp_routes
@@ -204,6 +210,9 @@ async def run_agent(
                                 else "completed"
                             )
                             print(f"  [tool] {status} {log_name}")
+                            if on_event:
+                                on_event({"type": "tool", "name": log_name, "status": status})
+
                 messages.append(
                     {
                         "role": "tool",
